@@ -1,0 +1,73 @@
+name: Supply-chain guard
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  detect-injected-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Reject known campaign indicators
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          patterns=(
+            "global\\['!'\\]"
+            "global\\['_V'\\]"
+            "global\\.i[[:space:]]*="
+            '_\\$_1e42'
+            '_0x32ebc7'
+            'GSkqNNyuJw\\$_padNcYwam'
+            'A10-\\*17950'
+            'A10-\\*19170'
+            'A10-\\*050'
+            'A11--&'
+            'temp_auto_push\\.bat'
+            'temp_interactive_push\\.bat'
+            'node[[:space:]]+\\./public/fonts/.*\\.woff2'
+          )
+
+          for pattern in "${patterns[@]}"; do
+            if git grep -I -n -E "$pattern" -- . ':!.github/workflows/supply-chain-guard.yml'; then
+              echo "::error::Supply-chain malware indicator detected: $pattern"
+              exit 1
+            fi
+          done
+
+      - name: Reject hidden appended scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r -d '' file; do
+            if perl -ne 'exit 0 if / {500,}\\S/; END { exit 1 }' "$file"; then
+              echo "::error file=$file::Executable content found after excessive padding"
+              failed=1
+            fi
+          done < <(git ls-files -z -- '*.js' '*.cjs' '*.mjs' '*.json')
+          test "$failed" -eq 0
+
+      - name: Validate tracked font signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r -d '' file; do
+            magic="$(od -An -tx1 -N4 "$file" | tr -d ' \\n')"
+            case "$file:$magic" in
+              *.woff2:774f4632|*.woff:774f4646|*.ttf:00010000|*.otf:4f54544f) ;;
+              *)
+                echo "::error file=$file::Font extension does not match a valid font signature"
+                failed=1
+                ;;
+            esac
+          done < <(git ls-files -z -- '*.woff' '*.woff2' '*.ttf' '*.otf')
+          test "$failed" -eq 0
